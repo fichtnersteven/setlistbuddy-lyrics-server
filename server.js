@@ -11,7 +11,7 @@ app.use(express.json());
 
 // Test Route
 app.get("/", (req, res) => {
-  res.send("SetlistBuddy Lyrics Server läuft (Lyrics.com + Genius) ✅");
+  res.send("SetlistBuddy Lyrics Server läuft (Genius API Version) ✅");
 });
 
 app.get("/lyrics", async (req, res) => {
@@ -27,121 +27,78 @@ app.get("/lyrics", async (req, res) => {
 
   const query = artist ? `${title} ${artist}` : title;
 
-  //
-  // 1️⃣ LYRICS.COM TRY
-  //
-  console.log("Lyrics.com Suche läuft...");
-
-  const searchUrl =
-    "https://www.lyrics.com/serp.php?st=" +
-    encodeURIComponent(query) +
-    "&qtype=2";
-
   try {
-    const searchResponse = await axios.get(searchUrl, {
+    //
+    // 1️⃣ GENIUS API – SEARCH
+    //
+    console.log("Genius API Suche:", query);
+
+    const geniusSearch = await axios.get(
+      "https://api.genius.com/search?q=" + encodeURIComponent(query),
+      {
+        headers: {
+          Authorization: "Bearer " + process.env.GENIUS_API_KEY,
+        },
+      }
+    );
+
+    const hits = geniusSearch.data.response.hits;
+
+    if (!hits || hits.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "Keine Genius-Ergebnisse gefunden.",
+      });
+    }
+
+    // Bestes Ergebnis wählen
+    const song = hits[0].result;
+    const geniusUrl = song.url;
+
+    console.log("GENIUS URL:", geniusUrl);
+
+    //
+    // 2️⃣ GENIUS HTML LADEN & LYRICS EXTRAHIEREN
+    //
+    const geniusPage = await axios.get(geniusUrl, {
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36",
       },
     });
 
-    const $search = cheerio.load(searchResponse.data);
+    const $ = cheerio.load(geniusPage.data);
+    let finalLyrics = "";
 
-    // mehrere mögliche Treffer-Selektoren
-    let firstLink =
-      $search(".sec-lyric.clearfix a").attr("href") ||
-      $search(".tdata-ext a").attr("href") ||
-      $search(".tdata a").attr("href") ||
-      $search(".lyric-meta-title a").attr("href") ||
-      $search('a[href^="/lyric/"]').attr("href"); // starker Fallback
-
-    if (firstLink) {
-      const lyricsUrl = "https://www.lyrics.com" + firstLink;
-
-      console.log("Lyrics.com Treffer:", lyricsUrl);
-
-      const lyricsResponse = await axios.get(lyricsUrl, {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36",
-        },
-      });
-
-      const $lyrics = cheerio.load(lyricsResponse.data);
-
-      const lyricsText = $lyrics(".lyric-body").text().trim();
-
-      if (lyricsText && lyricsText.length > 0) {
-        return res.json({
-          success: true,
-          source: "lyrics.com",
-          title,
-          artist,
-          lyrics: lyricsText,
-        });
-      }
-    }
-
-    //
-    // 2️⃣ GENIUS FALLBACK
-    //
-    console.log("Versuche Genius Fallback...");
-
-    const geniusSearchUrl =
-      "https://genius.com/api/search/multi?per_page=5&q=" +
-      encodeURIComponent(query);
-
-    const geniusResponse = await axios.get(geniusSearchUrl, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36",
-        Accept: "application/json",
-      },
+    // Neuer Genius HTML Standard
+    $("[data-lyrics-container='true']").each((i, el) => {
+      finalLyrics += $(el).text().trim() + "\n";
     });
 
-    const sections = geniusResponse.data.response.sections || [];
-    const songSection = sections.find((s) => s.type === "song");
+    // Ältere Genius Version (Fallback)
+    if (!finalLyrics.trim()) {
+      finalLyrics = $(".lyrics").text().trim();
+    }
 
-    if (songSection && songSection.hits.length > 0) {
-      const geniusUrl = songSection.hits[0].result.url;
-      console.log("GENIUS URL:", geniusUrl);
-
-      // Genius Lyrics Seite laden
-      const geniusPage = await axios.get(geniusUrl, {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36",
-        },
+    if (!finalLyrics.trim()) {
+      return res.status(404).json({
+        success: false,
+        error: "Lyrics nicht extrahierbar (Genius).",
       });
-
-      const $g = cheerio.load(geniusPage.data);
-      let geniusLyrics = "";
-
-      // typische Datenstruktur für Genius Lyrics
-      $g("[data-lyrics-container='true']").each((i, el) => {
-        geniusLyrics += $g(el).text().trim() + "\n";
-      });
-
-      if (geniusLyrics.trim().length > 0) {
-        return res.json({
-          success: true,
-          source: "genius",
-          title,
-          artist,
-          lyrics: geniusLyrics.trim(),
-        });
-      }
     }
 
     //
-    // 3️⃣ wenn beides nix liefert
+    // 🎉 Erfolgreich – Lyrics gefunden!
     //
-    return res.status(404).json({
-      success: false,
-      error: "Keine Lyrics gefunden (Lyrics.com & Genius ohne Treffer).",
+    return res.json({
+      success: true,
+      source: "genius",
+      title: song.full_title,
+      artist: song.primary_artist.name,
+      lyrics: finalLyrics.trim(),
     });
   } catch (err) {
-    console.log("Fehler:", err);
+    console.log("GENIUS API Fehler:", err);
     return res.status(500).json({
       success: false,
       error: "Serverfehler bei der Lyrics-Suche",
