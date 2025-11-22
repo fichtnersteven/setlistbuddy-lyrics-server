@@ -9,114 +9,90 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ──────────────────────────────────────
-// 1. Middleware / Basis
+// 1. Middleware
 // ──────────────────────────────────────
-
 app.use(cors());
 app.use(express.json());
 
 app.use((req, res, next) => {
-  console.log(
-    `[${new Date().toISOString()}] ${req.method} ${req.url} – query:`,
-    req.query
-  );
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
   next();
 });
 
-const lyricsLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 30,
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-app.use("/lyrics", lyricsLimiter);
+app.use(
+  "/lyrics",
+  rateLimit({
+    windowMs: 60 * 1000,
+    max: 30,
+  })
+);
 
 // ──────────────────────────────────────
-// 2. In-Memory Cache
+// 2. Cache
 // ──────────────────────────────────────
+const CACHE_TTL = 1000 * 60 * 60; // 1h
+const cache = new Map();
 
-const CACHE_TTL = 1000 * 60 * 60; // 1 Stunde
-const lyricsCache = new Map();
-
-function makeCacheKey(title, artist) {
-  return `${title.toLowerCase().trim()}::${(artist || "")
-    .toLowerCase()
-    .trim()}`;
+function getCacheKey(title, artist) {
+  return `${title.toLowerCase()}::${artist.toLowerCase()}`;
 }
 
-function getFromCache(title, artist) {
-  const key = makeCacheKey(title, artist);
-  const entry = lyricsCache.get(key);
-  if (!entry) return null;
-  if (Date.now() - entry.createdAt > CACHE_TTL) {
-    lyricsCache.delete(key);
-    return null;
-  }
-  return entry.data;
-}
-
-function saveToCache(title, artist, data) {
-  lyricsCache.set(makeCacheKey(title, artist), {
-    createdAt: Date.now(),
+function setCache(title, artist, data) {
+  cache.set(getCacheKey(title, artist), {
+    time: Date.now(),
     data,
   });
 }
 
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, entry] of lyricsCache.entries()) {
-    if (now - entry.createdAt > CACHE_TTL) lyricsCache.delete(key);
-  }
-}, 30 * 60 * 1000);
+function getCache(title, artist) {
+  const entry = cache.get(getCacheKey(title, artist));
+  if (!entry) return null;
+  if (Date.now() - entry.time > CACHE_TTL) return null;
+  return entry.data;
+}
 
 // ──────────────────────────────────────
-// 3. Axios-Client + Retry
+// 3. Axios mit Retry
 // ──────────────────────────────────────
-
 const http = axios.create({
-  timeout: 8000,
+  timeout: 10000,
   headers: {
     "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121 Safari/537.36",
-    Accept: "text/html,application/xhtml+xml",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
   },
 });
 
-async function fetchWithRetry(url, options = {}, retries = 2) {
-  for (let i = 0; i <= retries; i++) {
+async function fetchRetry(url, tries = 3) {
+  for (let i = 0; i < tries; i++) {
     try {
-      return await http.get(url, options);
-    } catch (err) {
-      if (i === retries) throw err;
-      console.log(`Retry ${i + 1}/${retries} für ${url}:`, err.message);
-      await new Promise((r) => setTimeout(r, 300 + i * 400));
+      return await http.get(url);
+    } catch (e) {
+      if (i === tries - 1) throw e;
+      await new Promise((r) => setTimeout(r, 500 + i * 300));
     }
   }
 }
 
 // ──────────────────────────────────────
-// 4. Genius API Helper
+// 4. Genius API
 // ──────────────────────────────────────
-
-async function searchWithGenius(query) {
-  const apiKey = process.env.GENIUS_API_KEY;
-  if (!apiKey) return null;
+async function geniusSearch(query) {
+  const key = process.env.GENIUS_API_KEY;
+  if (!key) return null;
 
   try {
-    const response = await axios.get("https://api.genius.com/search", {
+    const resp = await axios.get("https://api.genius.com/search", {
       params: { q: query },
-      headers: { Authorization: "Bearer " + apiKey },
-      timeout: 5000,
+      headers: { Authorization: "Bearer " + key },
     });
 
-    const hits = response?.data?.response?.hits || [];
-    if (!hits.length) return null;
+    const hit = resp?.data?.response?.hits?.[0]?.result;
+    if (!hit) return null;
 
-    const best = hits[0]?.result;
     return {
-      title: best.title,
-      artist: best.primary_artist?.name,
-      url: best.url,
+      title: hit.title,
+      artist: hit.primary_artist?.name,
+      url: hit.url,
     };
   } catch {
     return null;
@@ -124,148 +100,130 @@ async function searchWithGenius(query) {
 }
 
 // ──────────────────────────────────────
-// 5. songtexte.com Helpers
+// 5. songtexte.com: Vollständiger Multi-Treffer-Scan
 // ──────────────────────────────────────
 
-function buildSongtexteSearchUrl(query) {
-  return "https://www.songtexte.com/search?q=" + encodeURIComponent(query);
+// Step A: Suche auf songtexte.com
+function songtexteSearchUrl(q) {
+  return "https://www.songtexte.com/search?q=" + encodeURIComponent(q);
 }
 
-async function findSongtexteLink(finalQuery, expectedTitle, expectedArtist) {
-  const searchUrl = buildSongtexteSearchUrl(finalQuery);
-  console.log("➜ songtexte.com Search URL:", searchUrl);
+async function getSearchResults(query) {
+  const res = await fetchRetry(songtexteSearchUrl(query));
+  const $ = cheerio.load(res.data);
 
-  const searchResponse = await fetchWithRetry(searchUrl);
-  const $ = cheerio.load(searchResponse.data);
-
-  const links = [];
+  const results = [];
   $("a[href^='/songtext/']").each((i, el) => {
-    links.push({
-      href: $(el).attr("href"),
-      text: $(el).text().trim().toLowerCase(),
-    });
+    const href = $(el).attr("href");
+    const text = $(el).text().trim().toLowerCase();
+    results.push({ href, text });
   });
 
-  console.log("➜ Gefundene Treffer:", links.length);
-  if (!links.length) return null;
-
-  const artistNorm = (expectedArtist || "").toLowerCase();
-  const titleNorm = (expectedTitle || "").toLowerCase();
-
-  const filtered = links.filter(
-    (l) => l.text.includes(artistNorm) || l.text.includes(titleNorm)
-  );
-
-  console.log("➜ Filtered Treffer:", filtered.length);
-
-  const best = filtered[0] || links[0];
-  if (!best) return null;
-
-  return "https://www.songtexte.com" + best.href;
+  return results;
 }
 
-async function extractSongtexteLyrics(url) {
-  const response = await fetchWithRetry(url);
-  const $ = cheerio.load(response.data);
+// Step B: Lade jede Lyrics-Seite, prüfe Artist + Titel
+async function inspectSongtextePage(href) {
+  const url = "https://www.songtexte.com" + href;
+  const res = await fetchRetry(url);
+  const $ = cheerio.load(res.data);
 
-  const selectors = ["#lyrics", ".lyrics", ".songtext", ".content .lyrics"];
-  for (const sel of selectors) {
-    const txt = $(sel).text().trim();
-    if (txt) return txt;
+  const title = $(".headline").text().trim().toLowerCase();
+  const artist = $(".artist a").text().trim().toLowerCase();
+
+  const lyrics =
+    $("#lyrics").text().trim() ||
+    $(".lyrics").text().trim() ||
+    $(".songtext").text().trim() ||
+    null;
+
+  return { url, title, artist, lyrics };
+}
+
+// Step C: Finde beste Übereinstimmung
+async function findBestSongtexteMatch(queryTitle, queryArtist) {
+  const results = await getSearchResults(`${queryTitle} ${queryArtist}`);
+
+  if (!results.length) return null;
+
+  const targetArtist = queryArtist.toLowerCase();
+  const targetTitle = queryTitle.toLowerCase();
+
+  let bestMatch = null;
+
+  for (const item of results) {
+    const info = await inspectSongtextePage(item.href);
+
+    const artistMatch =
+      info.artist.includes(targetArtist) || targetArtist.includes(info.artist);
+
+    const titleMatch =
+      info.title.includes(targetTitle) || targetTitle.includes(info.title);
+
+    if (artistMatch && titleMatch) {
+      return info; // perfekte Übereinstimmung
+    }
+
+    if (!bestMatch) bestMatch = info;
   }
 
-  const collected = [];
-  $("p").each((_, el) => {
-    const t = $(el).text().trim();
-    if (
-      t &&
-      !t.toLowerCase().includes("cookies") &&
-      !t.toLowerCase().includes("privacy")
-    ) {
-      collected.push(t);
-    }
-  });
-
-  return collected.join("\n\n") || null;
+  return bestMatch || null;
 }
 
 // ──────────────────────────────────────
-// 6. Routes
+// 6. Route: /lyrics
 // ──────────────────────────────────────
-
-app.get("/", (req, res) => {
-  res.send("SetlistBuddy Lyrics Server läuft (Genius + songtexte.com) ✅");
-});
-
 app.get("/lyrics", async (req, res) => {
-  const rawTitle = req.query.title || "";
-  const rawArtist = req.query.artist || "";
-
-  const title = rawTitle.trim();
-  const artist = rawArtist.trim();
+  const title = (req.query.title || "").trim();
+  const artist = (req.query.artist || "").trim();
 
   if (!title)
-    return res.status(400).json({
-      success: false,
-      error: "Parameter 'title' fehlt.",
-    });
+    return res.status(400).json({ success: false, error: "title fehlt" });
 
-  const cached = getFromCache(title, artist);
+  const cached = getCache(title, artist);
   if (cached) return res.json({ ...cached, cache: true });
-
-  const baseQuery = artist ? `${title} ${artist}` : title;
 
   let finalTitle = title;
   let finalArtist = artist;
   let geniusUrl = null;
 
-  const genius = await searchWithGenius(baseQuery);
+  const genius = await geniusSearch(`${title} ${artist}`);
   if (genius) {
     finalTitle = genius.title || finalTitle;
     finalArtist = genius.artist || finalArtist;
     geniusUrl = genius.url;
   }
 
-  const finalQuery = `${finalTitle} ${finalArtist}`.trim();
+  const match = await findBestSongtexteMatch(finalTitle, finalArtist);
+  if (!match)
+    return res
+      .status(404)
+      .json({ success: false, error: "songtexte.com keine Treffer" });
 
-  const lyricsUrl = await findSongtexteLink(
-    finalQuery,
-    finalTitle,
-    finalArtist
-  );
-
-  if (!lyricsUrl)
-    return res.status(404).json({
-      success: false,
-      error: "songtexte.com hat keinen passenden Song gefunden.",
-    });
-
-  const lyrics = await extractSongtexteLyrics(lyricsUrl);
-  if (!lyrics)
-    return res.status(404).json({
-      success: false,
-      error: "songtexte.com hat keine Lyrics extrahiert.",
-    });
+  if (!match.lyrics)
+    return res
+      .status(404)
+      .json({ success: false, error: "Lyrics nicht gefunden" });
 
   const payload = {
     success: true,
-    source: "genius + songtexte.com",
     title: finalTitle,
     artist: finalArtist,
-    lyrics,
+    lyrics: match.lyrics,
+    lyricsUrl: match.url,
     geniusUrl,
-    lyricsUrl,
+    source: "genius + songtexte.com",
     cache: false,
   };
 
-  saveToCache(title, artist, payload);
+  setCache(title, artist, payload);
+
   res.json(payload);
 });
 
 // ──────────────────────────────────────
 // 7. Start
 // ──────────────────────────────────────
-
 app.listen(PORT, () => {
   console.log("Server läuft auf Port", PORT);
 });
