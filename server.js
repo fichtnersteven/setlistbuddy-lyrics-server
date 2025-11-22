@@ -1,9 +1,6 @@
-// server.js – Node + Express + AZLyrics + ai-lyrics
-
 const express = require("express");
 const cors = require("cors");
-const AZLyrics = require("azlyrics-ext");   // Primary Scraper
-const LyricsAI = require("ai-lyrics");      // Fallback Scraper
+const AZLyrics = require("azlyrics-ext");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -12,84 +9,68 @@ app.use(cors());
 app.use(express.json());
 
 app.get("/", (req, res) => {
-  res.send("SetlistBuddy Lyrics Server läuft (Node Version) ✅");
+  res.send("SetlistBuddy Lyrics Server läuft (AZLyrics Version) ✅");
 });
 
-/**
- * GET /lyrics
- * Parameter: title, artist
- */
 app.get("/lyrics", async (req, res) => {
-  const titleRaw = req.query.title || req.query.song || "";
-  const artistRaw = req.query.artist || "";
-
-  const title = titleRaw.toString().trim();
-  const artist = artistRaw.toString().trim();
+  const title = (req.query.title || "").toString().trim();
+  const artist = (req.query.artist || "").toString().trim();
 
   if (!title) {
     return res.status(400).json({
       success: false,
-      error: "Parameter 'title' fehlt.",
+      error: "Parameter 'title' fehlt."
     });
   }
 
   const query = artist ? `${title} ${artist}` : title;
 
-  //
-  // 1️⃣ Versuch: AZLyrics (schnell)
-  //
   try {
-    const songs = await AZLyrics.search(query);
-
-    if (Array.isArray(songs) && songs.length > 0) {
-      const track = await AZLyrics.getTrack(songs[0].url);
-
-      if (track && track.lyrics) {
-        return res.json({
-          success: true,
-          source: "azlyrics",
-          title: track.title || title,
-          artist: track.artist || artist,
-          lyrics: track.lyrics.trim(),
-        });
+    // 1. Suche
+    const results = await AZLyrics.search(query, {
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "en-US,en;q=0.9"
       }
-    }
-  } catch (err) {
-    console.log("AZLyrics Fehler:", err);
-  }
+    });
 
-  //
-  // 2️⃣ Versuch: ai-lyrics (Fallback, Puppeteer)
-  //
-  try {
-    let text;
-
-    if (artist) {
-      text = await LyricsAI.findLyricsBySongTitleAndArtist(title, artist);
-    } else {
-      text = await LyricsAI.findLyricsBySongTitle(title);
-    }
-
-    if (text) {
-      return res.json({
-        success: true,
-        source: "ai-lyrics",
-        title,
-        artist,
-        lyrics: text.toString().trim(),
+    if (!results || results.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "Keine Einträge bei AZLyrics gefunden."
       });
     }
-  } catch (err) {
-    console.log("ai-lyrics Fehler:", err);
-  }
 
-  //
-  // 3️⃣ Beide fehlgeschlagen
-  //
-  return res.status(404).json({
-    success: false,
-    error: "Keine Lyrics gefunden.",
-  });
+    // 2. Track holen
+    const track = await AZLyrics.getTrack(results[0].url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "en-US,en;q=0.9"
+      }
+    });
+
+    if (!track || !track.lyrics) {
+      return res.status(404).json({
+        success: false,
+        error: "Lyrics nicht gefunden."
+      });
+    }
+
+    return res.json({
+      success: true,
+      source: "azlyrics",
+      title: track.title || title,
+      artist: track.artist || artist,
+      lyrics: track.lyrics.trim()
+    });
+
+  } catch (err) {
+    console.log("AZLyrics Fehler:", err);
+    return res.status(500).json({
+      success: false,
+      error: "Fehler beim Abrufen der Lyrics"
+    });
+  }
 });
 
 app.listen(PORT, () => {
