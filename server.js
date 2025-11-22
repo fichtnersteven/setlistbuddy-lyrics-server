@@ -1,22 +1,39 @@
+const express = require("express");
+const cors = require("cors");
+const axios = require("axios");
+const cheerio = require("cheerio");
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use(cors());
+app.use(express.json());
+
+// Test-Route
+app.get("/", (req, res) => {
+  res.send("SetlistBuddy Lyrics Server läuft (Lyrics.com Version) ✅");
+});
+
 app.get("/lyrics", async (req, res) => {
   const title = (req.query.title || "").toString().trim();
   const artist = (req.query.artist || "").toString().trim();
 
   if (!title) {
-    return res.status(400).json({ success: false, error: "Parameter 'title' fehlt." });
+    return res.status(400).json({
+      success: false,
+      error: "Parameter 'title' fehlt.",
+    });
   }
 
   const query = artist ? `${title} ${artist}` : title;
+
   const searchUrl =
     "https://www.lyrics.com/serp.php?st=" +
     encodeURIComponent(query) +
     "&qtype=2";
 
-  const axios = require("axios");
-  const cheerio = require("cheerio");
-
   try {
-    // 1️⃣ Lyrics.com Suche laden
+    // 1) Lyrics.com Suche laden
     const searchResponse = await axios.get(searchUrl, {
       headers: {
         "User-Agent":
@@ -26,7 +43,7 @@ app.get("/lyrics", async (req, res) => {
 
     const $search = cheerio.load(searchResponse.data);
 
-    // 2️⃣ erstes Ergebnis holen
+    // 2) erstes Ergebnis holen
     const firstLink = $search(".sec-lyric.clearfix a:nth-child(1)").attr("href");
 
     if (!firstLink) {
@@ -38,7 +55,7 @@ app.get("/lyrics", async (req, res) => {
 
     const lyricsUrl = "https://www.lyrics.com" + firstLink;
 
-    // 3️⃣ Lyrics Seite laden
+    // 3) Lyrics Seite laden
     const lyricsResponse = await axios.get(lyricsUrl, {
       headers: {
         "User-Agent":
@@ -47,7 +64,6 @@ app.get("/lyrics", async (req, res) => {
     });
 
     const $lyrics = cheerio.load(lyricsResponse.data);
-
     const lyricsText = $lyrics(".lyric-body").text().trim();
 
     if (!lyricsText) {
@@ -57,7 +73,6 @@ app.get("/lyrics", async (req, res) => {
       });
     }
 
-    // erfolgreicher Treffer 🎉
     return res.json({
       success: true,
       source: "lyrics.com",
@@ -72,4 +87,8 @@ app.get("/lyrics", async (req, res) => {
       error: "Fehler beim Abrufen der Lyrics.com Daten",
     });
   }
+});
+
+app.listen(PORT, () => {
+  console.log("Server läuft auf Port", PORT);
 });
