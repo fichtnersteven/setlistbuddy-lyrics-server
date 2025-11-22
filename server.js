@@ -101,41 +101,10 @@ async function geniusSearch(query) {
 }
 
 // ──────────────────────────────────────
-// 5. Songtexte.com — PRO Suche
+// 5. Songtexte.com – PRO Suchsystem
 // ──────────────────────────────────────
 
-// 5.1 Such-URL
-function songtexteSearchUrl(query) {
-  return "https://www.songtexte.com/search?q=" + encodeURIComponent(query);
-}
-
-// 5.2 Trefferliste scrapen (Titel + Artist direkt!)
-async function getSearchResults(query) {
-  const res = await fetchRetry(songtexteSearchUrl(query));
-  const $ = cheerio.load(res.data);
-
-  const results = [];
-
-  // Jeder Treffer ist ein Block aus <a> und einer darunterliegenden Artist-Zeile
-  $("a[href^='/songtext/']").each((i, el) => {
-    const href = $(el).attr("href");
-    const title = $(el).text().trim();
-
-    // Künstler steht in der Zeile "von XYZ"
-    const artistElem = $(el).parent().find("span").text().trim();
-    const artist = artistElem.replace(/^von\s+/i, "");
-    
-    results.push({
-      href,
-      title: title.toLowerCase(),
-      artist: artist.toLowerCase(),
-    });
-  });
-
-  return results;
-}
-
-// Normalize für Vergleiche
+// Normalisierung
 function normalize(s) {
   return (s || "")
     .toLowerCase()
@@ -150,27 +119,87 @@ function fuzzy(a, b) {
   return a.includes(b) || b.includes(a);
 }
 
-// 5.3 Beste Übereinstimmung ermitteln
-async function findBestMatch(queryTitle, queryArtist) {
-  const res = await getSearchResults(`${queryTitle} ${queryArtist}`);
+function searchUrl(query) {
+  return "https://www.songtexte.com/search?q=" + encodeURIComponent(query);
+}
 
-  if (!res.length) return null;
+// 5.1 Top-Treffer finden (der große Kasten oben)
+async function parseTopHit($) {
+  const topBox = $(".box"); // der große Block ganz oben
+
+  if (!topBox.length) return null;
+
+  const link = topBox.find("a[href^='/songtext/']").attr("href");
+  const title = topBox.find("a[href^='/songtext/']").text().trim();
+  const artistRaw = topBox.find("div:contains('von ')").text().trim();
+
+  if (!link || !artistRaw || !title) return null;
+
+  const artist = artistRaw.replace(/^von\s+/i, "").trim();
+
+  return {
+    href: link,
+    title: title.toLowerCase(),
+    artist: artist.toLowerCase(),
+  };
+}
+
+// 5.2 Alle weiteren Treffer (unterhalb des Top-Treffers)
+async function parseListHits($) {
+  const results = [];
+
+  $("a[href^='/songtext/']").each((i, el) => {
+    const href = $(el).attr("href");
+    const title = $(el).text().trim();
+
+    if (!title) return;
+
+    const artistNode = $(el).parent().find("span:contains('von ')").text().trim();
+    const artist = artistNode.replace(/^von\s+/i, "").trim();
+
+    if (!artist) return;
+
+    results.push({
+      href,
+      title: title.toLowerCase(),
+      artist: artist.toLowerCase(),
+    });
+  });
+
+  return results;
+}
+
+// 5.3 Beste Übereinstimmung suchen
+async function findBestMatch(queryTitle, queryArtist) {
+  const searchPage = await fetchRetry(searchUrl(`${queryTitle} ${queryArtist}`));
+  const $ = cheerio.load(searchPage.data);
 
   const t = normalize(queryTitle);
   const a = normalize(queryArtist);
 
-  // 1. Direkte perfekte Matches
-  for (const r of res) {
-    if (fuzzy(r.title, t) && fuzzy(r.artist, a)) return r;
+  // 1) Top-Treffer prüfen
+  const top = await parseTopHit($);
+  if (top) {
+    if (fuzzy(top.title, t) && fuzzy(top.artist, a)) return top;
   }
 
-  // 2. Falls Titel stimmt, aber Artist leer oder anders
-  for (const r of res) {
+  // 2) Restliche Treffer prüfen
+  const list = await parseListHits($);
+
+  // perfekte Treffer
+  for (const r of list) {
+    if (fuzzy(r.title, t) && fuzzy(r.artist, a)) {
+      return r;
+    }
+  }
+
+  // Titel passt, Artist egal
+  for (const r of list) {
     if (fuzzy(r.title, t)) return r;
   }
 
-  // 3. Fallback: allererster Treffer
-  return res[0];
+  // fallback
+  return top || list[0] || null;
 }
 
 // 5.4 Lyrics extrahieren
@@ -215,14 +244,14 @@ app.get("/lyrics", async (req, res) => {
     geniusUrl = genius.url;
   }
 
-  // Songtexte.com Treffer auswählen
+  // 1) Songtexte-Treffer suchen
   const match = await findBestMatch(finalTitle, finalArtist);
   if (!match)
     return res
       .status(404)
       .json({ success: false, error: "songtexte.com keine Treffer" });
 
-  // Lyrics extrahieren
+  // 2) Lyrics laden
   const lyricsResult = await extractLyrics(match.href);
   if (!lyricsResult.lyrics)
     return res
@@ -236,7 +265,7 @@ app.get("/lyrics", async (req, res) => {
     lyrics: lyricsResult.lyrics,
     lyricsUrl: lyricsResult.url,
     geniusUrl,
-    source: "genius + songtexte.com (enhanced)",
+    source: "genius + songtexte.com (top-hit aware)",
     cache: false,
   };
 
@@ -246,7 +275,7 @@ app.get("/lyrics", async (req, res) => {
 });
 
 // ──────────────────────────────────────
-// 7. Start Server
+// 7. Start
 // ──────────────────────────────────────
 
 app.listen(PORT, () => {
