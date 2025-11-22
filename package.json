@@ -1,5 +1,7 @@
 {
   "dependencies": {
+    "ai-lyrics": "^1.1.1",
+    "azlyrics-ext": "^1.0.1",
     "cors": "^2.8.5",
     "express": "^5.1.0"
   }
