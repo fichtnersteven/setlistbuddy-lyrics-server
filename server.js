@@ -44,12 +44,12 @@ app.get("/lyrics", async (req, res) => {
     const $search = cheerio.load(searchResponse.data);
 
     // 2) erstes Ergebnis holen
-   let firstLink = 
+   let firstLink =
   $search(".sec-lyric.clearfix a").attr("href") ||
   $search(".tdata-ext a").attr("href") ||
   $search(".tdata a").attr("href") ||
-  $search(".lyric-meta-title a").attr("href");
-
+  $search(".lyric-meta-title a").attr("href") ||
+  $search('a[href^="/lyric/"]').attr("href");  // <-- wichtiger Fallback
 
     if (!firstLink) {
       return res.status(404).json({
