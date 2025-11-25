@@ -1,4 +1,4 @@
-// server.js – Lyrics Scraper with Scrape.do Proxy (Genius + Songtexte.com)
+// server.js – Lyrics Scraper with Scrape.do Proxy Render=true (Genius + Songtexte.com)
 
 import express from "express";
 import axios from "axios";
@@ -9,13 +9,14 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ---------------- PROXY USING SCRAPE.DO ----------------
+// ---------------- PROXY USING SCRAPE.DO (render: true) ----------------
 async function proxyRequest(url) {
   try {
     const result = await axios.get("https://api.scrape.do", {
       params: {
         token: process.env.SCRAPEDO_TOKEN,
-        url: url
+        url: url,
+        render: true
       },
       timeout: 20000
     });
@@ -34,7 +35,7 @@ app.get("/test", async (req, res) => {
   const html = await proxyRequest(url);
   if (!html) return res.send("FAILED to fetch HTML");
 
-  res.send(html.substring(0, 3000)); // first 3000 characters for debug
+  res.send(html.substring(0, 3000));
 });
 
 // ------------------ GENIUS SCRAPER ------------------
@@ -115,7 +116,7 @@ app.get("/lyrics", async (req, res) => {
 
 // ------------------ ROOT ------------------
 app.get("/", (req, res) => {
-  res.send("Lyrics API running with Scrape.do Proxy.");
+  res.send("Lyrics API running with Scrape.do Proxy + render=true.");
 });
 
 // ------------------ START ------------------
