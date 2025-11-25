@@ -1,10 +1,9 @@
-// server.js – Ultra-Reliable Scraper for Render
-// ✔ Reparierter Genius-Scraper (JSON aus __PRELOADED_STATE__)
-// ✔ Reparierter Songtexte.com-Scraper (#lyrics Selektor)
+// server.js – Ultra-Reliable Scraper for Render (2025)
+// ✔ Neuer Genius-Scraper (JSON aus __PRELOADED_STATE__ + sämtliche Fallback-Strukturen)
+// ✔ Neuer Songtexte.com-Scraper (2025 Selektoren + Fallbacks)
 // ✔ Keine externen Proxies
-// ✔ Funktioniert stabil auf Render
-// ✔ Test-Route integriert
-// ✔ Port-Fix für Render (kein Fallback!)
+// ✔ Anti-Blocker Headers
+// ✔ Cache, Test-Route, Port-Fix für Render
 
 import express from "express";
 import axios from "axios";
@@ -69,7 +68,7 @@ function detectStructure(lyrics) {
 }
 
 /* ---------------------------------------------------------
-   GENIUS SCRAPER (NEU)
+   GENIUS SCRAPER (2025 Revised)
 --------------------------------------------------------- */
 async function searchGenius(title, artist) {
   try {
@@ -91,11 +90,27 @@ async function searchGenius(title, artist) {
     if (!match) return null;
 
     const data = JSON.parse(match[1]);
+    const ld = data?.songPage?.lyricsData;
+    if (!ld) return null;
 
-    const lyrics =
-      data?.songPage?.lyricsData?.body?.plain ||
-      data?.songPage?.lyricsData?.body?.html ||
-      "";
+    let lyrics =
+      ld?.lyricsData?.body?.plain ||
+      ld?.lyricsData?.body?.html ||
+      null;
+
+    if (!lyrics && ld?.lyricsData?.sections) {
+      lyrics = ld.lyricsData.sections
+        .map((sec) => sec.plain || sec.html || sec.lyrics || "")
+        .join("\n\n");
+    }
+
+    if (!lyrics && ld?.body?.html) {
+      lyrics = ld.body.html;
+    }
+
+    if (!lyrics && ld?.body?.plain) {
+      lyrics = ld.body.plain;
+    }
 
     if (!lyrics) return null;
 
@@ -110,7 +125,7 @@ async function searchGenius(title, artist) {
 }
 
 /* ---------------------------------------------------------
-   SONGTEXTE SCRAPER (NEU)
+   SONGTEXTE.COM SCRAPER (2025 Revised)
 --------------------------------------------------------- */
 async function searchSongtexte(title, artist) {
   try {
@@ -120,15 +135,24 @@ async function searchSongtexte(title, artist) {
     const res = await http.get(searchUrl);
     const $ = cheerio.load(res.data);
 
-    // New (2024/2025) selector: search results
-    const bestLink = $("a.song").first().attr("href");
+    // NEW 2025 selector: results look like <a class="song" href="...">
+    let bestLink =
+      $("a.song").first().attr("href") ||
+      $("a.ste-result").first().attr("href") ||
+      null;
+
     if (!bestLink) return null;
 
     const page = await http.get("https://www.songtexte.com" + bestLink);
     const $2 = cheerio.load(page.data);
 
-    // New selector for lyrics
-    const raw = $2("#lyrics").text().trim();
+    // Updated 2025 lyric selectors
+    let raw =
+      $2("#lyrics").text().trim() ||
+      $2("#songtext").text().trim() ||
+      $2(".lyrics").text().trim() ||
+      "";
+
     if (!raw) return null;
 
     return {
@@ -199,7 +223,7 @@ app.get("/lyrics", async (req, res) => {
       success: true,
       title,
       artist,
-      lyrics: s.lyrics,
+      lyrics: s.lylyrics,
       lyricsUrl: s.url,
       sections: detectStructure(s.lyrics),
       source: "songtexte",
@@ -215,8 +239,7 @@ app.get("/lyrics", async (req, res) => {
 });
 
 /* ---------------------------------------------------------
-   START SERVER — WICHTIG!
-   Kein Fallback-Port! Render liefert PORT.
+   START SERVER (Render-Port)
 --------------------------------------------------------- */
 const PORT = process.env.PORT;
 app.listen(PORT, () => {
