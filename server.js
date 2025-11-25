@@ -92,7 +92,7 @@ async function searchGenius(title, artist) {
       lyrics: cleanLyrics(raw),
       url: best.url,
     };
-  } catch (e) {
+  } catch {
     return null;
   }
 }
@@ -121,10 +121,29 @@ async function searchSongtexte(title, artist) {
       lyrics: cleanLyrics(raw),
       url: "https://www.songtexte.com" + bestLink,
     };
-  } catch (e) {
+  } catch {
     return null;
   }
 }
+
+/* ---------------------------------------------------------
+   TEST ROUTE (WICHTIG!)
+--------------------------------------------------------- */
+app.get("/test", async (req, res) => {
+  try {
+    const r = await axios.get("https://example.com");
+    res.json({
+      success: true,
+      status: r.status,
+      snippet: String(r.data).slice(0, 200),
+    });
+  } catch (e) {
+    res.json({
+      success: false,
+      error: e.toString(),
+    });
+  }
+});
 
 /* ---------------------------------------------------------
    API ROUTE
@@ -181,9 +200,9 @@ app.get("/lyrics", async (req, res) => {
 });
 
 /* ---------------------------------------------------------
-   START SERVER
+   START SERVER (WICHTIG: OHNE Fallback-Port!)
 --------------------------------------------------------- */
-const PORT = process.env.PORT;
+const PORT = process.env.PORT; // Render PORT only, no fallback
 app.listen(PORT, () => {
   console.log(`Lyrics server läuft auf Port ${PORT}`);
 });
