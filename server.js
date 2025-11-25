@@ -1,5 +1,5 @@
-// server.js – erweiterte Version
-// Features: Genius + songtexte.com + Google-Fallback + Fuzzy-Suche + Section-Detection + Caching
+// server.js – komplette neu aufgebaute Version
+// Features: Genius + songtexte.com + Google Fallback + Section Detection + Caching
 
 import express from "express";
 import axios from "axios";
@@ -17,7 +17,7 @@ app.use(express.json());
 const cache = new NodeCache({ stdTTL: 86400 });
 
 function cacheKey(title, artist) {
-  return `${(title || "").toLowerCase()}__${(artist || "").toLowerCase()}`;
+  return `${title.toLowerCase()}__${artist.toLowerCase()}`;
 }
 
 function cacheGet(title, artist) {
@@ -47,155 +47,78 @@ async function fetchRetry(url, tries = 3) {
 }
 
 /* ---------------------------------------------------------
-   STRING / FUZZY HELPERS
---------------------------------------------------------- */
-function normalizeBasic(str = "") {
-  return str
-    .toLowerCase()
-    .replace(/ä/g, "ae")
-    .replace(/ö/g, "oe")
-    .replace(/ü/g, "ue")
-    .replace(/ß/g, "ss")
-    .replace(/[^a-z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function generateSearchQueries(title = "", artist = "") {
-  const tOriginal = title.trim();
-  const aOriginal = (artist || "").trim();
-
-  const tNorm = normalizeBasic(tOriginal);
-  const aNorm = normalizeBasic(aOriginal);
-
-  const queries = new Set();
-
-  if (tOriginal && aOriginal) {
-    queries.add(`${tOriginal} ${aOriginal} lyrics`);
-    queries.add(`${aOriginal} ${tOriginal} lyrics`);
-    queries.add(`${tOriginal} ${aOriginal} songtext`);
-  }
-
-  if (tNorm && aNorm) {
-    queries.add(`${tNorm} ${aNorm} lyrics`);
-    queries.add(`${aNorm} ${tNorm} lyrics`);
-    queries.add(`${tNorm} ${aNorm} songtext`);
-  }
-
-  if (tOriginal) {
-    queries.add(`${tOriginal} lyrics`);
-    queries.add(`${tOriginal} songtext`);
-  }
-  if (tNorm) {
-    queries.add(`${tNorm} lyrics`);
-    queries.add(`${tNorm} songtext`);
-  }
-
-  // Fallback nur Artist
-  if (!tOriginal && aOriginal) {
-    queries.add(`${aOriginal} lyrics`);
-    queries.add(`${aNorm} lyrics`);
-  }
-
-  // harte Limitierung, damit wir nicht zu viele Requests machen
-  return Array.from(queries).slice(0, 6);
-}
-
-/* ---------------------------------------------------------
    CLEANUP
 --------------------------------------------------------- */
 function cleanLyrics(txt) {
   return txt
     .replace(/\r/g, "")
-    .replace(/\u00a0/g, " ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
 /* ---------------------------------------------------------
-   SECTION DETECTION V2 (Block-basiert)
+   SECTION DETECTION
 --------------------------------------------------------- */
 function detectStructure(lyrics) {
-  if (!lyrics) return [];
+  const lines = lyrics.split("\n").map((l) => l.trim());
 
-  // In Strophen-Blöcke teilen (doppelte Zeilenumbrüche)
-  const blocks = lyrics
-    .split(/\n{2,}/)
-    .map((b) => b.trim())
-    .filter((b) => b.length > 0);
+  let sections = [];
+  let buffer = [];
+  let type = "Verse";
 
-  if (!blocks.length) return [];
+  const isChorusCandidate = (line) =>
+    line.length > 0 &&
+    /^[A-Za-zÄÖÜäöüß].+/.test(line) &&
+    line.length < 120;
 
-  if (blocks.length === 1) {
-    return [{ type: "Verse", text: blocks[0] }];
-  }
-
-  // Häufigste Strophe als Refrain erkennen
-  const normBlock = (b) =>
-    normalizeBasic(
-      b
-        .replace(/\n/g, " ")
-        .replace(/\s+/g, " ")
-        .trim()
-    );
-
-  const counts = new Map();
-  blocks.forEach((b) => {
-    const key = normBlock(b);
-    counts.set(key, (counts.get(key) || 0) + 1);
+  let repeatCheck = {};
+  lines.forEach((l) => {
+    repeatCheck[l] = (repeatCheck[l] || 0) + 1;
   });
 
-  let chorusKey = null;
-  let maxCount = 1;
-  for (const [key, cnt] of counts.entries()) {
-    if (cnt > maxCount && key.length > 10) {
-      maxCount = cnt;
-      chorusKey = key;
-    }
-  }
+  let chorusLines = Object.entries(repeatCheck)
+    .filter(([k, v]) => v >= 2 && k.length > 5)
+    .map(([k]) => k);
 
-  let hasBridge = false;
-  const sections = [];
+  let chorusMode = false;
 
-  blocks.forEach((block, index) => {
-    const key = normBlock(block);
-    let type = "Verse";
-
-    if (chorusKey && key === chorusKey) {
+  for (const line of lines) {
+    if (chorusLines.includes(line)) {
+      if (!chorusMode && buffer.length) {
+        sections.push({ type, text: buffer.join("\n") });
+        buffer = [];
+      }
       type = "Chorus";
-    } else if (
-      index === blocks.length - 1 &&
-      blocks.length > 2 &&
-      !chorusKey
-    ) {
-      type = "Outro";
-    } else if (
-      index >= 1 &&
-      index < blocks.length - 1 &&
-      !hasBridge &&
-      !chorusKey
-    ) {
-      type = "Bridge";
-      hasBridge = true;
+      chorusMode = true;
+      buffer.push(line);
+    } else {
+      chorusMode = false;
+      if (buffer.length && type !== "Verse") {
+        sections.push({ type, text: buffer.join("\n") });
+        buffer = [];
+      }
+      type = "Verse";
+      buffer.push(line);
     }
+  }
 
-    sections.push({ type, text: block });
-  });
+  if (buffer.length) {
+    sections.push({ type, text: buffer.join("\n") });
+  }
 
   return sections;
 }
 
 /* ---------------------------------------------------------
-   GENIUS SEARCH (Query-basiert)
+   GENIUS SEARCH
 --------------------------------------------------------- */
-async function searchGenius(query) {
-  const searchUrl = `https://genius.com/api/search/song?q=${encodeURIComponent(
-    query
-  )}`;
+async function searchGenius(title, artist) {
+  const q = encodeURIComponent(`${title} ${artist}`);
+  const searchUrl = `https://genius.com/api/search/song?q=${q}`;
 
   try {
     const res = await fetchRetry(searchUrl);
-    const hits = res.data?.response?.hits;
+    const hits = res.data.response.hits;
     if (!hits || !hits.length) return null;
 
     const best = hits[0].result;
@@ -217,16 +140,15 @@ async function searchGenius(query) {
 }
 
 /* ---------------------------------------------------------
-   SONGTEXTE.COM SCRAPER (Query-basiert)
+   SONGTEXTE.COM SCRAPER
 --------------------------------------------------------- */
-async function searchSongtexte(query) {
+async function searchSongtexte(title, artist) {
   try {
-    const q = encodeURIComponent(query);
+    const q = encodeURIComponent(`${title} ${artist}`);
     const url = `https://www.songtexte.com/search?q=${q}`;
     const res = await fetchRetry(url);
     const $ = cheerio.load(res.data);
 
-    // wir nehmen weiterhin den ersten Treffer, songtexte-Suche ist ziemlich gut
     let bestLink = $(".songs-list .song").first().find("a").attr("href");
     if (!bestLink) return null;
 
@@ -246,11 +168,11 @@ async function searchSongtexte(query) {
 }
 
 /* ---------------------------------------------------------
-   GOOGLE FALLBACK V2 (Query-basiert)
+   GOOGLE FALLBACK (neu)
 --------------------------------------------------------- */
-async function googleFallback(query) {
-  const url =
-    "https://www.google.com/search?q=" + encodeURIComponent(query + " lyrics");
+async function googleFallback(title, artist) {
+  const query = `${title} ${artist} lyrics`;
+  const url = "https://www.google.com/search?q=" + encodeURIComponent(query);
 
   try {
     const res = await fetchRetry(url);
@@ -260,9 +182,9 @@ async function googleFallback(query) {
     $("div, span").each((i, el) => {
       const t = $(el).text().trim();
       if (!t) return;
-      if (t.length < 200 || t.length > 8000) return;
-      if (/wikipedia|deezer|spotify|video|youtube/i.test(t)) return;
-      if (/bedeutung|translation|übersetzung|interpretation/i.test(t)) return;
+      if (t.length < 200 || t.length > 5000) return;
+      if (/wikipedia|deezer|spotify|video/i.test(t)) return;
+      if (/bedeutung|translation|übersetzung/i.test(t)) return;
       if (t.split("\n").length < 4) return;
       candidates.push(t);
     });
@@ -286,37 +208,26 @@ async function googleFallback(query) {
 app.get("/lyrics", async (req, res) => {
   const { title, artist } = req.query;
 
-  if (!title) {
-    return res.json({ success: false, error: "Missing title" });
-  }
+  if (!title) return res.json({ success: false, error: "Missing title" });
 
   const finalArtist = artist || "";
   const finalTitle = title;
 
   // CACHE
   const cached = cacheGet(finalTitle, finalArtist);
-  if (cached) {
-    return res.json({ ...cached, cache: true });
-  }
+  if (cached) return res.json({ ...cached, cache: true });
 
-  // Suchvarianten erzeugen (Fuzzy)
-  const queries = generateSearchQueries(finalTitle, finalArtist);
+  // GENIUS
+  const g = await searchGenius(finalTitle, finalArtist);
 
-  // 1) GENIUS – alle Varianten durchprobieren
-  let geniusResult = null;
-  for (const q of queries) {
-    geniusResult = await searchGenius(q);
-    if (geniusResult?.lyrics) break;
-  }
-
-  if (geniusResult?.lyrics) {
-    const sections = detectStructure(geniusResult.lyrics);
+  if (g?.lyrics) {
+    const sections = detectStructure(g.lyrics);
     const resp = {
       success: true,
       title: finalTitle,
       artist: finalArtist,
-      lyrics: geniusResult.lyrics,
-      lyricsUrl: geniusResult.url,
+      lyrics: g.lyrics,
+      lyricsUrl: g.url,
       sections,
       source: "genius",
       cache: false,
@@ -325,21 +236,16 @@ app.get("/lyrics", async (req, res) => {
     return res.json(resp);
   }
 
-  // 2) SONGTEXTE – alle Varianten durchprobieren
-  let stResult = null;
-  for (const q of queries) {
-    stResult = await searchSongtexte(q);
-    if (stResult?.lyrics) break;
-  }
-
-  if (stResult?.lyrics) {
-    const sections = detectStructure(stResult.lyrics);
+  // SONGTEXTE
+  const s = await searchSongtexte(finalTitle, finalArtist);
+  if (s?.lyrics) {
+    const sections = detectStructure(s.lyrics);
     const resp = {
       success: true,
       title: finalTitle,
       artist: finalArtist,
-      lyrics: stResult.lyrics,
-      lyricsUrl: stResult.url,
+      lyrics: s.lyrics,
+      lyricsUrl: s.url,
       sections,
       source: "songtexte",
       cache: false,
@@ -348,20 +254,15 @@ app.get("/lyrics", async (req, res) => {
     return res.json(resp);
   }
 
-  // 3) GOOGLE FALLBACK – als letzte Instanz
-  let gResult = null;
-  for (const q of queries) {
-    gResult = await googleFallback(q);
-    if (gResult?.lyrics) break;
-  }
-
-  if (gResult?.lyrics) {
-    const sections = detectStructure(gResult.lyrics);
+  // GOOGLE FALLBACK
+  const g2 = await googleFallback(finalTitle, finalArtist);
+  if (g2?.lyrics) {
+    const sections = detectStructure(g2.lyrics);
     const resp = {
       success: true,
       title: finalTitle,
       artist: finalArtist,
-      lyrics: gResult.lyrics,
+      lyrics: g2.lyrics,
       lyricsUrl: null,
       sections,
       source: "google-fallback",
@@ -377,6 +278,4 @@ app.get("/lyrics", async (req, res) => {
 /* ---------------------------------------------------------
    START SERVER
 --------------------------------------------------------- */
-app.listen(3000, () =>
-  console.log("Lyrics server läuft auf Port 3000")
-);
+app.listen(3000, () => console.log("Lyrics server läuft auf Port 3000"));
