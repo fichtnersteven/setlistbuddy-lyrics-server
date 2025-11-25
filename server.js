@@ -183,7 +183,7 @@ app.get("/lyrics", async (req, res) => {
 /* ---------------------------------------------------------
    START SERVER
 --------------------------------------------------------- */
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT;
 app.listen(PORT, () => {
   console.log(`Lyrics server läuft auf Port ${PORT}`);
 });
