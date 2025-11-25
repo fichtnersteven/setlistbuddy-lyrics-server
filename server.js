@@ -1,248 +1,281 @@
+// server.js – komplette neu aufgebaute Version
+// Features: Genius + songtexte.com + Google Fallback + Section Detection + Caching
 
-require("dotenv").config();
-const express = require("express");
-const cors = require("cors");
-const axios = require("axios");
-const cheerio = require("cheerio");
-const rateLimit = require("express-rate-limit");
+import express from "express";
+import axios from "axios";
+import cheerio from "cheerio";
+import cors from "cors";
+import NodeCache from "node-cache";
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-
 app.use(cors());
 app.use(express.json());
 
-app.use("/lyrics",
-  rateLimit({
-    windowMs: 60 * 1000,
-    max: 30,
-  })
-);
-
-const CACHE_TTL = 1000 * 60 * 60;
-const cache = new Map();
+/* ---------------------------------------------------------
+   CACHE
+--------------------------------------------------------- */
+const cache = new NodeCache({ stdTTL: 86400 });
 
 function cacheKey(title, artist) {
-  return `${(title||"").toLowerCase()}::${(artist||"").toLowerCase()}`;
+  return `${title.toLowerCase()}__${artist.toLowerCase()}`;
 }
 
 function cacheGet(title, artist) {
-  const k = cacheKey(title, artist);
-  const entry = cache.get(k);
-  if (!entry) return null;
-  if (Date.now() - entry.timestamp > CACHE_TTL) {
-    cache.delete(k);
-    return null;
-  }
-  return entry.data;
+  return cache.get(cacheKey(title, artist));
 }
-
 function cacheSet(title, artist, data) {
-  cache.set(cacheKey(title, artist), { data, timestamp: Date.now() });
+  cache.set(cacheKey(title, artist), data);
 }
 
-const http = axios.create({
-  timeout: 12000,
-  headers: {
-    "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36",
-  },
-});
-
+/* ---------------------------------------------------------
+   HTTP WRAPPER WITH RETRIES
+--------------------------------------------------------- */
 async function fetchRetry(url, tries = 3) {
-  for (let i=0;i<tries;i++){
-    try { return await http.get(url); }
-    catch(e){
-      if(i===tries-1) throw e;
-      await new Promise(r=>setTimeout(r,300+i*300));
+  while (tries--) {
+    try {
+      return await axios.get(url, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/123 Safari/537.36",
+        },
+        timeout: 7000,
+      });
+    } catch (e) {
+      if (tries === 0) throw e;
     }
   }
 }
 
-async function geniusSearch(query) {
-  const key = process.env.GENIUS_API_KEY;
-  if (!key) return null;
-  try {
-    const resp = await axios.get("https://api.genius.com/search", {
-      params:{ q:query },
-      headers:{ Authorization:"Bearer "+key },
-      timeout:8000
-    });
-    const hit = resp?.data?.response?.hits?.[0]?.result;
-    if(!hit) return null;
-    return {
-      title: hit.title,
-      artist: hit.primary_artist?.name,
-      url: hit.url
-    };
-  } catch(e){
-    return null;
-  }
-}
-
-function normalize(s){
-  return (s||"").toLowerCase().normalize("NFKD").replace(/[^\w\s]/g,"").trim();
-}
-
-function fuzzy(a,b){
-  a=normalize(a); b=normalize(b);
-  if(!a||!b) return false;
-  return a.includes(b)||b.includes(a);
-}
-
-function songtexteSearchUrl(q){
-  return "https://www.songtexte.com/suche?c=all&q="+encodeURIComponent(q);
-}
-
-function parseTopHit($){
-  const hit=$(".topHitBox .topHit");
-  if(!hit.length) return null;
-  const href=hit.find(".topHitLink").attr("href");
-  const title=hit.find(".topHitLink").text().trim();
-  const artist=hit.find(".topHitSubline a").text().trim();
-  if(!href||!title||!artist) return null;
-  return { href, title:title.toLowerCase(), artist:artist.toLowerCase() };
-}
-
-function parseListHits($){
-  const results=[];
-  $(".songResultTable > div > div").each((i,row)=>{
-    const $r=$(row);
-    const link=$r.find(".song a[href*='/songtext/']").first();
-    const href=link.attr("href");
-    const t=link.text().trim();
-    const a=$r.find(".artist span").last().text().trim();
-    if(href&&t&&a) results.push({ href, title:t.toLowerCase(), artist:a.toLowerCase() });
-  });
-  return results;
-}
-
-async function findBestMatch(t,a){
-  const searchRes=await fetchRetry(songtexteSearchUrl(t+" "+a));
-  const $=cheerio.load(searchRes.data);
-
-  const nt=normalize(t), na=normalize(a);
-  const top=parseTopHit($);
-  const list=parseListHits($);
-
-  if(top && fuzzy(top.title,nt) && fuzzy(top.artist,na)) return top;
-  for(const r of list) if(fuzzy(r.title,nt)&&fuzzy(r.artist,na)) return r;
-  for(const r of list) if(fuzzy(r.title,nt)) return r;
-  if(top) return top;
-  return list[0]||null;
-}
-
-function cleanLyrics(txt){
-  if(!txt) return "";
+/* ---------------------------------------------------------
+   CLEANUP
+--------------------------------------------------------- */
+function cleanLyrics(txt) {
   return txt
-    .replace(/<!--([\s\S]*?)-->/g,"")
-    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g,"")
-    .replace(/ADNPM\.[^\n]+/g,"")
-    .replace(/\*\/+/g,"") 
-    .replace(/<[^>]*>/g,"")
-    .replace(/\r/g,"")
-    .replace(/[ \t]+$/gm,"")
-    .replace(/\n{3,}/g,"\n\n")
+    .replace(/\r/g, "")
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
-async function extractLyrics(href){
-  const clean=href.startsWith("/")?href:"/"+href;
-  const url="https://www.songtexte.com"+clean;
-  const res=await fetchRetry(url);
-  const $=cheerio.load(res.data);
-  const raw=$("#lyrics").text().trim()||$(".lyrics").text().trim()||$(".songtext").text().trim()||"";
-  return { url, lyrics: cleanLyrics(raw) };
-}
+/* ---------------------------------------------------------
+   SECTION DETECTION
+--------------------------------------------------------- */
+function detectStructure(lyrics) {
+  const lines = lyrics.split("\n").map((l) => l.trim());
 
-function similarity(a,b){
-  a=(a||"").toLowerCase(); b=(b||"").toLowerCase();
-  const len=Math.min(a.length,b.length);
-  if(!len) return 0;
-  let m=0;
-  for(let i=0;i<len;i++) if(a[i]===b[i]) m++;
-  return m/len;
-}
+  let sections = [];
+  let buffer = [];
+  let type = "Verse";
 
-function detectStructure(text){
-  const blocks=text.split(/\n\s*\n/).map(b=>b.trim()).filter(b=>b.length>0);
-  if(!blocks.length) return [];
-  const norm=blocks.map(b=>b.toLowerCase());
+  const isChorusCandidate = (line) =>
+    line.length > 0 &&
+    /^[A-Za-zÄÖÜäöüß].+/.test(line) &&
+    line.length < 120;
 
-  let chorusIndex=-1;
-  for(let i=0;i<norm.length;i++){
-    for(let j=i+1;j<norm.length;j++){
-      if(similarity(norm[i],norm[j])>0.55){ chorusIndex=i; break; }
+  let repeatCheck = {};
+  lines.forEach((l) => {
+    repeatCheck[l] = (repeatCheck[l] || 0) + 1;
+  });
+
+  let chorusLines = Object.entries(repeatCheck)
+    .filter(([k, v]) => v >= 2 && k.length > 5)
+    .map(([k]) => k);
+
+  let chorusMode = false;
+
+  for (const line of lines) {
+    if (chorusLines.includes(line)) {
+      if (!chorusMode && buffer.length) {
+        sections.push({ type, text: buffer.join("\n") });
+        buffer = [];
+      }
+      type = "Chorus";
+      chorusMode = true;
+      buffer.push(line);
+    } else {
+      chorusMode = false;
+      if (buffer.length && type !== "Verse") {
+        sections.push({ type, text: buffer.join("\n") });
+        buffer = [];
+      }
+      type = "Verse";
+      buffer.push(line);
     }
-    if(chorusIndex!==-1) break;
   }
 
-  const sections=[];
-  blocks.forEach((block,idx)=>{
-    let type="verse";
-    let conf=0.5;
-
-    if(idx===chorusIndex && chorusIndex!==-1){ type="chorus"; conf=0.9; }
-    else if(idx>chorusIndex && chorusIndex!==-1){
-      if(similarity(norm[idx],norm[chorusIndex])>0.55){ type="chorus"; conf=0.85; }
-    }
-
-    if(type==="verse" && idx>1 && idx>=blocks.length-2){
-      type="bridge"; conf=Math.max(conf,0.6);
-    }
-
-    sections.push({ type, confidence:conf, text:block });
-  });
+  if (buffer.length) {
+    sections.push({ type, text: buffer.join("\n") });
+  }
 
   return sections;
 }
 
-app.get("/lyrics", async (req,res)=>{
-  const title=(req.query.title||"").trim();
-  const artist=(req.query.artist||"").trim();
-  if(!title) return res.status(400).json({ success:false, error:"title fehlt" });
+/* ---------------------------------------------------------
+   GENIUS SEARCH
+--------------------------------------------------------- */
+async function searchGenius(title, artist) {
+  const q = encodeURIComponent(`${title} ${artist}`);
+  const searchUrl = `https://genius.com/api/search/song?q=${q}`;
 
-  const cached=cacheGet(title,artist);
-  if(cached) return res.json({...cached, cache:true});
+  try {
+    const res = await fetchRetry(searchUrl);
+    const hits = res.data.response.hits;
+    if (!hits || !hits.length) return null;
 
-  let finalTitle=title, finalArtist=artist, geniusUrl=null;
+    const best = hits[0].result;
+    const url = best.url;
+    const html = await fetchRetry(url);
+    const $ = cheerio.load(html.data);
 
-  const genius=await geniusSearch(`${title} ${artist}`);
-  if(genius){
-    finalTitle=genius.title||finalTitle;
-    finalArtist=genius.artist||finalArtist;
-    geniusUrl=genius.url||null;
+    let lyrics = $("div[data-lyrics-container]")
+      .text()
+      .replace(/\n{3,}/g, "\n")
+      .trim();
+
+    if (!lyrics) return null;
+
+    return { lyrics: cleanLyrics(lyrics), url };
+  } catch {
+    return null;
   }
+}
 
-  try{
-    const match=await findBestMatch(finalTitle,finalArtist);
-    if(!match) return res.json({success:false,error:"Kein Treffer"});
+/* ---------------------------------------------------------
+   SONGTEXTE.COM SCRAPER
+--------------------------------------------------------- */
+async function searchSongtexte(title, artist) {
+  try {
+    const q = encodeURIComponent(`${title} ${artist}`);
+    const url = `https://www.songtexte.com/search?q=${q}`;
+    const res = await fetchRetry(url);
+    const $ = cheerio.load(res.data);
 
-    const lr=await extractLyrics(match.href);
-    if(!lr.lyrics) return res.json({success:false,error:"Keine Lyrics"});
+    let bestLink = $(".songs-list .song").first().find("a").attr("href");
+    if (!bestLink) return null;
 
-    const sections=detectStructure(lr.lyrics);
+    const page = await fetchRetry("https://www.songtexte.com" + bestLink);
+    const $2 = cheerio.load(page.data);
 
-    const resp={
-      success:true,
-      title:finalTitle,
-      artist:finalArtist,
-      lyrics:lr.lyrics,
-      lyricsUrl:lr.url,
-      geniusUrl,
-      sections,
-      cache:false
+    let lyrics = $2(".lyrics").text().trim();
+    if (!lyrics) return null;
+
+    return {
+      lyrics: cleanLyrics(lyrics),
+      url: "https://www.songtexte.com" + bestLink,
     };
-
-    cacheSet(title,artist,resp);
-    res.json(resp);
-  }catch(e){
-    res.json({success:false,error:"Serverfehler"});
+  } catch {
+    return null;
   }
+}
+
+/* ---------------------------------------------------------
+   GOOGLE FALLBACK (neu)
+--------------------------------------------------------- */
+async function googleFallback(title, artist) {
+  const query = `${title} ${artist} lyrics`;
+  const url = "https://www.google.com/search?q=" + encodeURIComponent(query);
+
+  try {
+    const res = await fetchRetry(url);
+    const $ = cheerio.load(res.data);
+    let candidates = [];
+
+    $("div, span").each((i, el) => {
+      const t = $(el).text().trim();
+      if (!t) return;
+      if (t.length < 200 || t.length > 5000) return;
+      if (/wikipedia|deezer|spotify|video/i.test(t)) return;
+      if (/bedeutung|translation|übersetzung/i.test(t)) return;
+      if (t.split("\n").length < 4) return;
+      candidates.push(t);
+    });
+
+    if (!candidates.length) return null;
+
+    candidates.sort(
+      (a, b) => b.split("\n").length - a.split("\n").length
+    );
+
+    const best = candidates[0];
+    return { lyrics: cleanLyrics(best), url: null };
+  } catch {
+    return null;
+  }
+}
+
+/* ---------------------------------------------------------
+   API ROUTE
+--------------------------------------------------------- */
+app.get("/lyrics", async (req, res) => {
+  const { title, artist } = req.query;
+
+  if (!title) return res.json({ success: false, error: "Missing title" });
+
+  const finalArtist = artist || "";
+  const finalTitle = title;
+
+  // CACHE
+  const cached = cacheGet(finalTitle, finalArtist);
+  if (cached) return res.json({ ...cached, cache: true });
+
+  // GENIUS
+  const g = await searchGenius(finalTitle, finalArtist);
+
+  if (g?.lyrics) {
+    const sections = detectStructure(g.lyrics);
+    const resp = {
+      success: true,
+      title: finalTitle,
+      artist: finalArtist,
+      lyrics: g.lyrics,
+      lyricsUrl: g.url,
+      sections,
+      source: "genius",
+      cache: false,
+    };
+    cacheSet(finalTitle, finalArtist, resp);
+    return res.json(resp);
+  }
+
+  // SONGTEXTE
+  const s = await searchSongtexte(finalTitle, finalArtist);
+  if (s?.lyrics) {
+    const sections = detectStructure(s.lyrics);
+    const resp = {
+      success: true,
+      title: finalTitle,
+      artist: finalArtist,
+      lyrics: s.lyrics,
+      lyricsUrl: s.url,
+      sections,
+      source: "songtexte",
+      cache: false,
+    };
+    cacheSet(finalTitle, finalArtist, resp);
+    return res.json(resp);
+  }
+
+  // GOOGLE FALLBACK
+  const g2 = await googleFallback(finalTitle, finalArtist);
+  if (g2?.lyrics) {
+    const sections = detectStructure(g2.lyrics);
+    const resp = {
+      success: true,
+      title: finalTitle,
+      artist: finalArtist,
+      lyrics: g2.lyrics,
+      lyricsUrl: null,
+      sections,
+      source: "google-fallback",
+      cache: false,
+    };
+    cacheSet(finalTitle, finalArtist, resp);
+    return res.json(resp);
+  }
+
+  return res.json({ success: false, error: "Kein Treffer" });
 });
 
-app.get("/",(req,res)=>{
-  res.json({status:"ok",service:"lyrics-server",time:new Date().toISOString()});
-});
-
-app.listen(PORT,()=>console.log("Server läuft auf Port",PORT));
+/* ---------------------------------------------------------
+   START SERVER
+--------------------------------------------------------- */
+app.listen(3000, () => console.log("Lyrics server läuft auf Port 3000"));
