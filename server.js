@@ -1,4 +1,4 @@
-// server.js – Lyrics Scraper with Scrape.do Proxy Render=true (Genius + Songtexte.com)
+// server.js – Lyrics Scraper with Scrape.do Proxy (render=true + super=true + desktop)
 
 import express from "express";
 import axios from "axios";
@@ -9,16 +9,18 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ---------------- PROXY USING SCRAPE.DO (render: true) ----------------
+// ---------------- PROXY USING SCRAPE.DO (render + super mode) ----------------
 async function proxyRequest(url) {
   try {
     const result = await axios.get("https://api.scrape.do", {
       params: {
         token: process.env.SCRAPEDO_TOKEN,
         url: url,
-        render: true
+        render: true,
+        super: true,
+        device: "desktop"
       },
-      timeout: 20000
+      timeout: 25000
     });
     return result.data;
   } catch (err) {
@@ -27,81 +29,66 @@ async function proxyRequest(url) {
   }
 }
 
-// --------------- TEST ENDPOINT ----------------
+// ---------------- TEST ENDPOINT ----------------
 app.get("/test", async (req, res) => {
   const { url } = req.query;
   if (!url) return res.send("Missing ?url=");
-
   const html = await proxyRequest(url);
   if (!html) return res.send("FAILED to fetch HTML");
-
-  res.send(html.substring(0, 3000));
+  res.send(html.substring(0, 5000));
 });
 
-// ------------------ GENIUS SCRAPER ------------------
+// ---------------- GENIUS SCRAPER ----------------
 async function fetchFromGenius(title, artist) {
   try {
     const query = encodeURIComponent(`${artist} ${title} lyrics`);
     const searchUrl = `https://genius.com/search?q=${query}`;
-
     const searchHtml = await proxyRequest(searchUrl);
     if (!searchHtml) return null;
     const $ = cheerio.load(searchHtml);
-
     const first = $("a.mini_card").first().attr("href");
     if (!first) return null;
-
     const lyricsHtml = await proxyRequest(first);
     if (!lyricsHtml) return null;
     const $$ = cheerio.load(lyricsHtml);
-
     let lyrics = "";
     $$("div[data-lyrics-container='true']").each((i, el) => {
       lyrics += $$(el).text().trim() + "\n";
     });
-
     if (!lyrics.trim()) return null;
-
     return { success: true, source: "genius", lyrics: lyrics.trim() };
-  } catch (err) {
+  } catch {
     return null;
   }
 }
 
-// --------------- SONGTEXTE.COM SCRAPER ----------------
+// ---------------- SONGTEXTE.COM SCRAPER ----------------
 async function fetchFromSongtexte(title, artist) {
   try {
     const query = encodeURIComponent(`${artist} ${title}`);
     const searchUrl = `https://www.songtexte.com/search?q=${query}`;
-
     const searchHtml = await proxyRequest(searchUrl);
     if (!searchHtml) return null;
     const $ = cheerio.load(searchHtml);
-
     let songUrl = $(".topHitBox .topHitLink").attr("href");
     if (!songUrl) songUrl = $(".songResultTable a").first().attr("href");
     if (!songUrl) return null;
-
     if (!songUrl.startsWith("http"))
       songUrl = "https://www.songtexte.com" + songUrl;
-
     const lyricsHtml = await proxyRequest(songUrl);
     if (!lyricsHtml) return null;
     const $$ = cheerio.load(lyricsHtml);
-
     let lyrics = $$("#lyrics").text().trim().replace(/\r/g, "");
     if (!lyrics.length) return null;
-
     return { success: true, source: "songtexte.com", lyrics };
-  } catch (err) {
+  } catch {
     return null;
   }
 }
 
-// ------------------ MAIN ENDPOINT ------------------
+// ---------------- MAIN ENDPOINT ----------------
 app.get("/lyrics", async (req, res) => {
   const { title, artist } = req.query;
-
   if (!title || !artist)
     return res.json({ success: false, error: "Missing title or artist" });
 
@@ -114,11 +101,11 @@ app.get("/lyrics", async (req, res) => {
   res.json({ success: false, error: "No lyrics found from any source." });
 });
 
-// ------------------ ROOT ------------------
+// ---------------- ROOT ----------------
 app.get("/", (req, res) => {
-  res.send("Lyrics API running with Scrape.do Proxy + render=true.");
+  res.send("Lyrics API running with Scrape.do (render + super + desktop).");
 });
 
-// ------------------ START ------------------
+// ---------------- START ----------------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Server running on port " + PORT));
