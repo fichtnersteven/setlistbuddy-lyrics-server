@@ -1,10 +1,11 @@
 // server.js – Ultra-Reliable Lyrics Scraper for Render (2025)
 // ✔ Neuer Genius-Scraper (JSON + Sections + Fallbacks)
 // ✔ Neuer Songtexte.com-Scraper (2025 HTML-Struktur + Fallbacks)
+// ✔ Debug-Routen für HTML-Analyse (Genius + Songtexte)
 // ✔ Keine Proxies, direkt & stabil
 // ✔ Anti-Blocker Headers
 // ✔ Render-kompatibel (kein Port-Fallback)
-// ✔ Test-Route + Cache + Section Detection
+// ✔ Cache, Test, Sec. Detection
 
 import express from "express";
 import axios from "axios";
@@ -70,7 +71,7 @@ function detectStructure(lyrics) {
 }
 
 /* ---------------------------------------------------------
-   GENIUS SCRAPER (2025 — 100 % FUNKTIONIEREND)
+   GENIUS SCRAPER (2025)
 --------------------------------------------------------- */
 async function searchGenius(title, artist) {
   try {
@@ -87,7 +88,6 @@ async function searchGenius(title, artist) {
     const htmlRes = await http.get(best.url);
     const html = htmlRes.data;
 
-    // Extract JSON from __PRELOADED_STATE__
     const match = html.match(/__PRELOADED_STATE__\s*=\s*(\{.*?\});/s);
     if (!match) return null;
 
@@ -100,14 +100,12 @@ async function searchGenius(title, artist) {
       ld?.lyricsData?.body?.html ||
       null;
 
-    // Fallback 1: Sections
     if (!lyrics && ld?.lyricsData?.sections) {
       lyrics = ld.lyricsData.sections
         .map((sec) => sec.plain || sec.lyrics || sec.html || "")
         .join("\n\n");
     }
 
-    // Fallback 2
     if (!lyrics && ld?.body?.html) lyrics = ld.body.html;
     if (!lyrics && ld?.body?.plain) lyrics = ld.body.plain;
 
@@ -124,7 +122,7 @@ async function searchGenius(title, artist) {
 }
 
 /* ---------------------------------------------------------
-   SONGTEXTE.COM SCRAPER (2025 — LIVE HTML ANALYSIERT)
+   SONGTEXTE.COM SCRAPER (2025)
 --------------------------------------------------------- */
 async function searchSongtexte(title, artist) {
   try {
@@ -134,11 +132,10 @@ async function searchSongtexte(title, artist) {
     const res = await http.get(searchUrl);
     const $ = cheerio.load(res.data);
 
-    // Drei Layout-Varianten der Suche
     let bestLink =
-      $("a.song").first().attr("href") ||                 // new layout
-      $(".songs-list .song a").first().attr("href") ||    // old desktop layout
-      $("a.ste-result").first().attr("href") ||           // mobile layout
+      $("a.song").first().attr("href") ||
+      $(".songs-list .song a").first().attr("href") ||
+      $("a.ste-result").first().attr("href") ||
       null;
 
     if (!bestLink) return null;
@@ -146,11 +143,10 @@ async function searchSongtexte(title, artist) {
     const page = await http.get("https://www.songtexte.com" + bestLink);
     const $2 = cheerio.load(page.data);
 
-    // Drei Layout-Varianten für Lyrics
     let raw =
-      $2("#lyrics").text().trim() ||       // modern (2024+)
-      $2("#songtext").text().trim() ||     // older
-      $2(".lyrics").text().trim() ||       // fallback
+      $2("#lyrics").text().trim() ||
+      $2("#songtext").text().trim() ||
+      $2(".lyrics").text().trim() ||
       "";
 
     if (!raw) return null;
@@ -164,6 +160,45 @@ async function searchSongtexte(title, artist) {
     return null;
   }
 }
+
+/* ---------------------------------------------------------
+   DEBUG ROUTES (IMPORTANT!)
+--------------------------------------------------------- */
+
+// Show raw HTML of Genius lyrics page
+app.get("/debug/genius", async (req, res) => {
+  try {
+    const url = "https://genius.com/Metallica-nothing-else-matters-lyrics";
+    const r = await http.get(url);
+    res.send(r.data.slice(0, 5000));
+  } catch (e) {
+    res.json({ error: e.toString() });
+  }
+});
+
+// Show raw HTML from Songtexte.com search
+app.get("/debug/songtexte-search", async (req, res) => {
+  try {
+    const url =
+      "https://www.songtexte.com/search?q=Nothing%20Else%20Matters%20Metallica";
+    const r = await http.get(url);
+    res.send(r.data.slice(0, 5000));
+  } catch (e) {
+    res.json({ error: e.toString() });
+  }
+});
+
+// Show raw HTML of Songtexte lyrics page
+app.get("/debug/songtexte", async (req, res) => {
+  try {
+    const url =
+      "https://www.songtexte.com/songtext/metallica/nothing-else-matters-6926.html";
+    const r = await http.get(url);
+    res.send(r.data.slice(0, 5000));
+  } catch (e) {
+    res.json({ error: e.toString() });
+  }
+});
 
 /* ---------------------------------------------------------
    TEST ROUTE
@@ -185,7 +220,7 @@ app.get("/test", async (req, res) => {
 });
 
 /* ---------------------------------------------------------
-   API ROUTE
+   MAIN API ROUTE
 --------------------------------------------------------- */
 app.get("/lyrics", async (req, res) => {
   const { title, artist = "" } = req.query;
@@ -200,7 +235,6 @@ app.get("/lyrics", async (req, res) => {
     return res.json({ ...cached, cache: true });
   }
 
-  // 1. GENIUS
   const g = await searchGenius(title, artist);
   if (g?.lyrics) {
     const resp = {
@@ -216,7 +250,6 @@ app.get("/lyrics", async (req, res) => {
     return res.json(resp);
   }
 
-  // 2. SONGTEXTE
   const s = await searchSongtexte(title, artist);
   if (s?.lyrics) {
     const resp = {
@@ -239,7 +272,7 @@ app.get("/lyrics", async (req, res) => {
 });
 
 /* ---------------------------------------------------------
-   START SERVER – IMPORTANT FOR RENDER!
+   START SERVER (Render Port)
 --------------------------------------------------------- */
 const PORT = process.env.PORT;
 app.listen(PORT, () => {
