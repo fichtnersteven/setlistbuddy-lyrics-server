@@ -1,6 +1,7 @@
 {
   "name": "setlistbuddy-lyrics-server",
   "version": "1.0.0",
+  "type": "module",
   "description": "Lyrics Server für SetlistBuddy (Genius + songtexte.com)",
   "main": "server.js",
   "scripts": {
