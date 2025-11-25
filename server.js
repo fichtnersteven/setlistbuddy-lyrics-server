@@ -1,9 +1,10 @@
 // server.js – Ultra-Reliable Scraper for Render
-// ✔ Keine externen Proxy-Dienste
-// ✔ Direkte Requests mit Anti-Blocker-Headers
+// ✔ Reparierter Genius-Scraper (JSON aus __PRELOADED_STATE__)
+// ✔ Reparierter Songtexte.com-Scraper (#lyrics Selektor)
+// ✔ Keine externen Proxies
 // ✔ Funktioniert stabil auf Render
-// ✔ Quellen: Genius + Songtexte.com
-// ✔ Automatische Strukturierung (Verses)
+// ✔ Test-Route integriert
+// ✔ Port-Fix für Render (kein Fallback!)
 
 import express from "express";
 import axios from "axios";
@@ -28,7 +29,7 @@ function makeCacheKey(title, artist) {
    AXIOS INSTANCE – Anti-Blocker
 --------------------------------------------------------- */
 const http = axios.create({
-  timeout: 10000,
+  timeout: 12000,
   headers: {
     "User-Agent":
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/123 Safari/537.36",
@@ -51,7 +52,7 @@ function cleanLyrics(txt) {
 }
 
 /* ---------------------------------------------------------
-   SIMPLE SECTION SPLIT
+   SECTION DETECTION
 --------------------------------------------------------- */
 function detectStructure(lyrics) {
   if (!lyrics) return [];
@@ -68,7 +69,7 @@ function detectStructure(lyrics) {
 }
 
 /* ---------------------------------------------------------
-   GENIUS SCRAPER
+   GENIUS SCRAPER (NEU)
 --------------------------------------------------------- */
 async function searchGenius(title, artist) {
   try {
@@ -82,52 +83,66 @@ async function searchGenius(title, artist) {
     const best = hits[0].result;
     if (!best?.url) return null;
 
-    const html = await http.get(best.url);
-    const $ = cheerio.load(html.data);
+    const htmlRes = await http.get(best.url);
+    const html = htmlRes.data;
 
-    const raw = $("div[data-lyrics-container]").text().trim();
-    if (!raw) return null;
+    // Extract JSON from __PRELOADED_STATE__
+    const match = html.match(/__PRELOADED_STATE__\s*=\s*(\{.*?\});/s);
+    if (!match) return null;
+
+    const data = JSON.parse(match[1]);
+
+    const lyrics =
+      data?.songPage?.lyricsData?.body?.plain ||
+      data?.songPage?.lyricsData?.body?.html ||
+      "";
+
+    if (!lyrics) return null;
 
     return {
-      lyrics: cleanLyrics(raw),
+      lyrics: cleanLyrics(lyrics),
       url: best.url,
     };
-  } catch {
+  } catch (e) {
+    console.log("Genius error:", e.toString());
     return null;
   }
 }
 
 /* ---------------------------------------------------------
-   SONGTEXTE.COM SCRAPER
+   SONGTEXTE SCRAPER (NEU)
 --------------------------------------------------------- */
 async function searchSongtexte(title, artist) {
   try {
-    const query = encodeURIComponent(`${title} ${artist}`.trim());
-    const searchUrl = `https://www.songtexte.com/search?q=${query}`;
+    const q = encodeURIComponent(`${title} ${artist}`.trim());
+    const searchUrl = `https://www.songtexte.com/search?q=${q}`;
 
     const res = await http.get(searchUrl);
     const $ = cheerio.load(res.data);
 
-    const bestLink = $(".songs-list .song a").first().attr("href");
+    // New (2024/2025) selector: search results
+    const bestLink = $("a.song").first().attr("href");
     if (!bestLink) return null;
 
     const page = await http.get("https://www.songtexte.com" + bestLink);
     const $2 = cheerio.load(page.data);
 
-    const raw = $2(".lyrics").text().trim();
+    // New selector for lyrics
+    const raw = $2("#lyrics").text().trim();
     if (!raw) return null;
 
     return {
       lyrics: cleanLyrics(raw),
       url: "https://www.songtexte.com" + bestLink,
     };
-  } catch {
+  } catch (e) {
+    console.log("Songtexte error:", e.toString());
     return null;
   }
 }
 
 /* ---------------------------------------------------------
-   TEST ROUTE (WICHTIG!)
+   TEST ROUTE
 --------------------------------------------------------- */
 app.get("/test", async (req, res) => {
   try {
@@ -200,9 +215,10 @@ app.get("/lyrics", async (req, res) => {
 });
 
 /* ---------------------------------------------------------
-   START SERVER (WICHTIG: OHNE Fallback-Port!)
+   START SERVER — WICHTIG!
+   Kein Fallback-Port! Render liefert PORT.
 --------------------------------------------------------- */
-const PORT = process.env.PORT; // Render PORT only, no fallback
+const PORT = process.env.PORT;
 app.listen(PORT, () => {
   console.log(`Lyrics server läuft auf Port ${PORT}`);
 });
