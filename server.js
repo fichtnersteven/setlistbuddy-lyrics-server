@@ -1,4 +1,4 @@
-// server.js – Lyrics Scraper with Genius + Songtexte.com + Proxy + Test Endpoint
+// server.js – Lyrics Scraper with Scrape.do Proxy (Genius + Songtexte.com)
 
 import express from "express";
 import axios from "axios";
@@ -9,27 +9,24 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ---------------- PROXY (bypasses Cloudflare) ----------------
+// ---------------- PROXY USING SCRAPE.DO ----------------
 async function proxyRequest(url) {
   try {
-    const response = await axios.get(url, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        Accept: "text/html",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Cache-Control": "no-cache",
-        Pragma: "no-cache"
+    const result = await axios.get("https://api.scrape.do", {
+      params: {
+        token: process.env.SCRAPEDO_TOKEN,
+        url: url
       },
-      timeout: 15000
+      timeout: 20000
     });
-    return response.data;
+    return result.data;
   } catch (err) {
+    console.error("Scrape.do proxy failed:", err.message);
     return null;
   }
 }
 
-// --------------- TEST ENDPOINT (HTML preview) ----------------
+// --------------- TEST ENDPOINT ----------------
 app.get("/test", async (req, res) => {
   const { url } = req.query;
   if (!url) return res.send("Missing ?url=");
@@ -37,7 +34,7 @@ app.get("/test", async (req, res) => {
   const html = await proxyRequest(url);
   if (!html) return res.send("FAILED to fetch HTML");
 
-  res.send(html.substring(0, 2000)); // first 2000 chars
+  res.send(html.substring(0, 3000)); // first 3000 characters for debug
 });
 
 // ------------------ GENIUS SCRAPER ------------------
@@ -118,7 +115,7 @@ app.get("/lyrics", async (req, res) => {
 
 // ------------------ ROOT ------------------
 app.get("/", (req, res) => {
-  res.send("Lyrics API running with Proxy.");
+  res.send("Lyrics API running with Scrape.do Proxy.");
 });
 
 // ------------------ START ------------------
