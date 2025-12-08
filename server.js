@@ -1,229 +1,320 @@
-// server.js – Free Lyrics API (ChartLyrics + Google Snippet) with section detection
-// No proxies, no API keys, designed to run on Render.
+// server.js – Clean 2025 Version
+// Features:
+// - /lyrics?title=&artist=  → Genius → songtexte.com → Google-Fallback
+// - Caching (NodeCache)
+// - /health endpoint
+// - Express + CORS
 
 import express from "express";
 import axios from "axios";
 import * as cheerio from "cheerio";
 import cors from "cors";
+import NodeCache from "node-cache";
 
 const app = express();
+const PORT = process.env.PORT || 3000;
+
+// ---------------------------------------------------------
+// Basis-Setup
+// ---------------------------------------------------------
 app.use(cors());
 app.use(express.json());
 
-const USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+// axios Default-Timeout
+axios.defaults.timeout = 8000;
 
-// ------------------------ HTTP HELPER ------------------------
-async function httpGet(url) {
+// Cache: 24h
+const cache = new NodeCache({ stdTTL: 60 * 60 * 24 });
+
+// ---------------------------------------------------------
+// Helper
+// ---------------------------------------------------------
+function normalize(str = "") {
+  return str
+    .toLowerCase()
+    .replace(/\(.*?\)/g, "") // Klammern-Inhalt entfernen (Remaster etc.)
+    .replace(/\[.*?\]/g, "")
+    .replace(/[^a-z0-9äöüß ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function makeCacheKey(title, artist) {
+  return `${normalize(title)}__${normalize(artist)}`;
+}
+
+function cacheGet(title, artist) {
+  return cache.get(makeCacheKey(title, artist));
+}
+
+function cacheSet(title, artist, data) {
+  cache.set(makeCacheKey(title, artist), data);
+}
+
+// Ganz einfache Sections-Erkennung: trennt nach Leerzeilen
+function detectSections(lyrics) {
+  if (!lyrics) return [];
+  const blocks = lyrics.split(/\n{2,}/).map((b) => b.trim()).filter(Boolean);
+  return blocks.map((block, i) => ({
+    label: `Part ${i + 1}`,
+    text: block,
+  }));
+}
+
+// ---------------------------------------------------------
+// Scraper 1 – Genius
+// ---------------------------------------------------------
+async function scrapeGenius(title, artist) {
   try {
+    const q = encodeURIComponent(`${title} ${artist}`);
+    const searchUrl = `https://genius.com/api/search/song?q=${q}`;
+
+    const searchRes = await axios.get(searchUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        Accept: "application/json, text/plain, */*",
+      },
+    });
+
+    const hits = searchRes.data?.response?.sections?.[0]?.hits || [];
+    if (!hits.length) return { success: false, reason: "no_hits" };
+
+    // Nimm einfach den ersten Treffer
+    const best = hits[0].result;
+    const songUrl = best.url;
+    if (!songUrl) return { success: false, reason: "no_url" };
+
+    const pageRes = await axios.get(songUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+      },
+    });
+
+    const $ = cheerio.load(pageRes.data);
+
+    // Genius Lyrics-Container (Stand: data-lyrics-container)
+    const containers = $('[data-lyrics-container="true"]');
+    if (!containers.length) {
+      return { success: false, reason: "no_lyrics_container" };
+    }
+
+    let lyrics = "";
+    containers.each((_, el) => {
+      const t = $(el).text().trim();
+      if (t) lyrics += t + "\n";
+    });
+    lyrics = lyrics.trim();
+
+    if (!lyrics) return { success: false, reason: "empty_lyrics" };
+
+    return {
+      success: true,
+      source: "genius",
+      title: best.full_title || title,
+      artist: best.primary_artist?.name || artist,
+      lyrics,
+    };
+  } catch (err) {
+    console.log("❌ Genius-Scraper Fehler:", err.message);
+    return { success: false, reason: "error" };
+  }
+}
+
+// ---------------------------------------------------------
+// Scraper 2 – songtexte.com
+// ---------------------------------------------------------
+async function scrapeSongtexte(title, artist) {
+  try {
+    const q = encodeURIComponent(`${title} ${artist}`);
+    const searchUrl = `https://www.songtexte.com/search?q=${q}`;
+
+    const searchRes = await axios.get(searchUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+      },
+    });
+
+    const $ = cheerio.load(searchRes.data);
+
+    // TopHit zuerst versuchen
+    let songUrl = $(".topHitBox .topHitLink").attr("href");
+
+    // Falls kein TopHit: erste Zeile aus der Trefferliste
+    if (!songUrl) {
+      const firstRow = $(".songResultTable .row .title a").first();
+      songUrl = firstRow.attr("href");
+    }
+
+    if (!songUrl) {
+      return { success: false, reason: "no_result" };
+    }
+
+    if (!songUrl.startsWith("http")) {
+      songUrl = "https://www.songtexte.com" + songUrl;
+    }
+
+    const pageRes = await axios.get(songUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+      },
+    });
+
+    const $$ = cheerio.load(pageRes.data);
+
+    // songtexte.com Lyrics sind meist im #lyrics-Container
+    let lyrics = $$("#lyrics").text().trim();
+    if (!lyrics) {
+      // Fallback
+      lyrics = $$(".lyrics").text().trim();
+    }
+
+    if (!lyrics) {
+      return { success: false, reason: "empty_lyrics" };
+    }
+
+    // Titel/Artist versuchen auszulesen
+    const pageTitle = $$("h1").first().text().trim() || title;
+    const pageArtist = $$(".artist a").first().text().trim() || artist;
+
+    return {
+      success: true,
+      source: "songtexte.com",
+      title: pageTitle,
+      artist: pageArtist,
+      lyrics,
+    };
+  } catch (err) {
+    console.log("❌ songtexte.com-Scraper Fehler:", err.message);
+    return { success: false, reason: "error" };
+  }
+}
+
+// ---------------------------------------------------------
+// Scraper 3 – Google Fallback (sehr einfach, kann wackeln)
+// ---------------------------------------------------------
+async function scrapeGoogle(title, artist) {
+  try {
+    const q = encodeURIComponent(`${title} ${artist} lyrics`);
+    const url = `https://www.google.com/search?q=${q}&hl=de`;
+
     const res = await axios.get(url, {
       headers: {
-        "User-Agent": USER_AGENT,
+        "User-Agent": "Mozilla/5.0",
         Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Cache-Control": "no-cache",
       },
-      timeout: 15000,
     });
-    return res.data;
-  } catch (err) {
-    console.error("httpGet failed for", url, "-", err.message);
-    return null;
-  }
-}
 
-// ------------------------ SECTION DETECTION ------------------------
-// Takes plain lyrics text and returns structured sections (verse/chorus/bridge/other)
-function splitIntoSections(lyrics) {
-  if (!lyrics) return [];
+    const $ = cheerio.load(res.data);
 
-  const normalized = lyrics.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
-  if (!normalized) return [];
-
-  const blocks = normalized.split(/\n\s*\n+/); // split on empty lines
-
-  // Count repeated blocks to guess a chorus
-  const counts = new Map();
-  for (const b of blocks) {
-    const t = b.trim();
-    if (!t) continue;
-    counts.set(t, (counts.get(t) || 0) + 1);
-  }
-
-  const sections = [];
-  for (let i = 0; i < blocks.length; i++) {
-    const text = blocks[i].trim();
-    if (!text) continue;
-
-    const lower = text.toLowerCase();
-
-    let type = "verse";
-
-    // Explicit markers
-    if (/\[\s*chorus\s*\]/i.test(text) || /refrain/i.test(text)) {
-      type = "chorus";
-    } else if (/\[\s*bridge\s*\]/i.test(text) || /bridge/i.test(lower)) {
-      type = "bridge";
-    } else {
-      // Guess chorus by repetition
-      const count = counts.get(text) || 0;
-      if (count >= 2) {
-        type = "chorus";
+    // Dies ist heuristisch und kann sich ändern
+    // Oft stecken die Lyrics-Snippets in BNeawe-Divs
+    let lyrics = "";
+    $("div.BNeawe.tAd8D.AP7Wnd").each((_, el) => {
+      const t = $(el).text();
+      if (t && t.includes("\n")) {
+        lyrics = t.trim();
+        return false; // break
       }
+    });
+
+    if (!lyrics) {
+      return { success: false, reason: "no_snippet" };
     }
-
-    sections.push({ type, text });
-  }
-
-  return sections;
-}
-
-// ------------------------ CHARTLYRICS SCRAPER ------------------------
-// Uses the public ChartLyrics API (XML) – no API key required.
-async function fetchFromChartLyrics(title, artist) {
-  try {
-    const url =
-      "http://api.chartlyrics.com/apiv1.asmx/SearchLyricDirect" +
-      `?artist=${encodeURIComponent(artist)}` +
-      `&song=${encodeURIComponent(title)}`;
-
-    const xml = await httpGet(url);
-    if (!xml) return null;
-
-    // Parse XML with cheerio in xmlMode
-    const $ = cheerio.load(xml, { xmlMode: true });
-
-    const lyric = $("Lyric").first().text().trim();
-    if (!lyric) {
-      console.log("ChartLyrics: empty Lyric node");
-      return null;
-    }
-
-    let cleaned = lyric
-      .replace(/\r/g, "")
-      .replace(/\t/g, "")
-      .replace(/ +/g, " ")
-      .replace(/\n{3,}/g, "\n\n")
-      .trim();
-
-    if (!cleaned) return null;
 
     return {
       success: true,
-      source: "chartlyrics",
-      rawLyrics: cleaned,
-      sections: splitIntoSections(cleaned),
+      source: "google",
+      title,
+      artist,
+      lyrics,
     };
   } catch (err) {
-    console.error("fetchFromChartLyrics error:", err.message);
-    return null;
+    console.log("❌ Google-Scraper Fehler:", err.message);
+    return { success: false, reason: "error" };
   }
 }
 
-// ------------------------ GOOGLE SNIPPET SCRAPER ------------------------
-// WARNING: This is best-effort only; Google layout changes often.
-async function fetchFromGoogleSnippet(title, artist) {
-  try {
-    const q = encodeURIComponent(`${artist} ${title} lyrics`);
-    const url = `https://www.google.com/search?q=${q}`;
-    const html = await httpGet(url);
-    if (!html) return null;
-
-    const $ = cheerio.load(html);
-    let snippet = "";
-
-    // Try lyrics-like blocks (heuristic)
-    // 1) data-lyricid containers
-    if (!snippet) {
-      $("[data-lyricid]").each((_, el) => {
-        const t = $(el).text().trim();
-        if (t && t.split("\n").length > 4) {
-          snippet = t;
-          return false;
-        }
-      });
-    }
-
-    // 2) BNeawe containers
-    if (!snippet) {
-      $("div.BNeawe.tAd8D.AP7Wnd").each((_, el) => {
-        const t = $(el).text().trim();
-        if (t && t.split("\n").length > 4) {
-          snippet = t;
-          return false;
-        }
-      });
-    }
-
-    if (!snippet) {
-      console.log("Google snippet: no lyrics-like block found");
-      return null;
-    }
-
-    const cleaned = snippet
-      .replace(/·/g, "")
-      .replace(/(lyrics provided by.*)$/i, "")
-      .replace(/\n{3,}/g, "\n\n")
-      .trim();
-
-    if (!cleaned) return null;
-
-    return {
-      success: true,
-      source: "google-snippet",
-      rawLyrics: cleaned,
-      sections: splitIntoSections(cleaned),
-    };
-  } catch (err) {
-    console.error("fetchFromGoogleSnippet error:", err.message);
-    return null;
-  }
-}
-
-// ------------------------ API ENDPOINTS ------------------------
-
-// Debug endpoint: inspect raw HTML of any URL
-app.get("/test", async (req, res) => {
-  const { url } = req.query;
-  if (!url) return res.send("Missing ?url=");
-
-  const html = await httpGet(url);
-  if (!html) return res.send("FAILED to fetch HTML");
-
-  res.send(html.substring(0, 5000));
-});
-
-// Main lyrics endpoint
+// ---------------------------------------------------------
+// Haupt-Route: /lyrics
+// ---------------------------------------------------------
 app.get("/lyrics", async (req, res) => {
   const { title, artist } = req.query;
 
   if (!title || !artist) {
-    return res.json({
+    return res.status(400).json({
       success: false,
-      error: "Missing title or artist",
+      error: "Missing 'title' or 'artist' query parameter",
     });
   }
 
-  // 1) ChartLyrics
-  let result = await fetchFromChartLyrics(title, artist);
-  if (result) return res.json(result);
+  const cacheHit = cacheGet(title, artist);
+  if (cacheHit) {
+    return res.json({
+      success: true,
+      cached: true,
+      ...cacheHit,
+    });
+  }
 
-  // 2) Google Snippet
-  result = await fetchFromGoogleSnippet(title, artist);
-  if (result) return res.json(result);
+  // 1. Genius
+  const genius = await scrapeGenius(title, artist);
+  if (genius.success) {
+    const sections = detectSections(genius.lyrics);
+    const payload = { ...genius, sections };
+    cacheSet(title, artist, payload);
+    return res.json({
+      success: true,
+      cached: false,
+      ...payload,
+    });
+  }
 
-  // 3) Nothing worked
-  return res.json({
+  // 2. songtexte.com
+  const st = await scrapeSongtexte(title, artist);
+  if (st.success) {
+    const sections = detectSections(st.lyrics);
+    const payload = { ...st, sections };
+    cacheSet(title, artist, payload);
+    return res.json({
+      success: true,
+      cached: false,
+      ...payload,
+    });
+  }
+
+  // 3. Google
+  const google = await scrapeGoogle(title, artist);
+  if (google.success) {
+    const sections = detectSections(google.lyrics);
+    const payload = { ...google, sections };
+    cacheSet(title, artist, payload);
+    return res.json({
+      success: true,
+      cached: false,
+      ...payload,
+    });
+  }
+
+  // Nichts gefunden
+  return res.status(404).json({
     success: false,
-    error: "No lyrics found from ChartLyrics or Google.",
+    error: "No lyrics found from any source",
+    geniusReason: genius.reason,
+    songtexteReason: st.reason,
+    googleReason: google.reason,
   });
 });
 
-// Root
-app.get("/", (req, res) => {
-  res.send("Free Lyrics API running (ChartLyrics + Google snippet).");
+// ---------------------------------------------------------
+// Health Check
+// ---------------------------------------------------------
+app.get("/health", (req, res) => {
+  res.json({ ok: true, uptime: process.uptime() });
 });
 
-// Start
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Server running on port " + PORT));
+// ---------------------------------------------------------
+// Start Server
+// ---------------------------------------------------------
+app.listen(PORT, () => {
+  console.log(`🎵 Lyrics-Server läuft auf Port ${PORT}`);
+});
