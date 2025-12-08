@@ -152,9 +152,13 @@ async function scrapeSongtexte(title, artist) {
       return { success: false, reason: "no_result" };
     }
 
-    if (!songUrl.startsWith("http")) {
-      songUrl = "https://www.songtexte.com" + songUrl;
+   if (!songUrl.startsWith("http")) {
+    if (!songUrl.startsWith("/")) {
+        songUrl = "/" + songUrl;
     }
+    songUrl = "https://www.songtexte.com" + songUrl;
+}
+
 
     const pageRes = await axios.get(songUrl, {
       headers: {
