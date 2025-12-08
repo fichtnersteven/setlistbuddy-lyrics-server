@@ -318,3 +318,6 @@ app.get("/health", (req, res) => {
 app.listen(PORT, () => {
   console.log(`🎵 Lyrics-Server läuft auf Port ${PORT}`);
 });
+app.get("/", (req, res) => {
+  res.send("SetlistBuddy Lyrics Server läuft ✔️");
+});
