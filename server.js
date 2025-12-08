@@ -89,6 +89,9 @@ async function scrapeGenius(title, artist) {
         "User-Agent": "Mozilla/5.0",
       },
     });
+// DEBUG – ersten 500 Zeichen anzeigen
+console.log("GENIUS HTML SNIPPET:");
+console.log(pageRes.data.slice(0, 500));
 
     const $ = cheerio.load(pageRes.data);
 
@@ -158,6 +161,8 @@ async function scrapeSongtexte(title, artist) {
         "User-Agent": "Mozilla/5.0",
       },
     });
+console.log("SONGTEXTE HTML SNIPPET:");
+console.log(pageRes.data.slice(0, 500));
 
     const $$ = cheerio.load(pageRes.data);
 
@@ -203,6 +208,8 @@ async function scrapeGoogle(title, artist) {
         Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       },
     });
+console.log("GOOGLE HTML SNIPPET:");
+console.log(res.data.slice(0, 500));
 
     const $ = cheerio.load(res.data);
 
